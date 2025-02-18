@@ -1,0 +1,164 @@
+// Pin Definitions
+#define RX_PIN 5             // UART Receive pin for pH probe
+#define TX_PIN 4             // UART Transmit pin for pH probe
+#define RED_LED_PIN 6        // Red LED for high acidity warning
+#define GREEN_LED_PIN 7      // Green LED for normal pH
+#define THERMISTOR_PIN A0    // Analog pin for thermistor input
+#define THRESHOLD_TEMP 30.0  // Temperature threshold in °C for activation
+#define PH_THRESHOLD 5.5     // pH threshold for ECC risk
+
+// Timing Variables
+unsigned long samplingDuration = 0;  // Total accumulated sampling time
+unsigned long totalAcidicTime = 0;   // Time spent below pH threshold
+unsigned long totalNeutralTime = 0;  // Time spent above pH threshold
+unsigned long lastSamplingTime = 0;  // Last recorded time for sampling
+bool samplingEnabled = false;        // Tracks if sampling is active
+bool intervalComplete = false;       // Tracks if the 1-minute interval is complete
+bool ledStateSet = false;            // Tracks if LED state has been updated
+
+void setup() {
+  // Initialize Serial communication for debugging
+  Serial.begin(9600);
+  Serial1.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+
+  // Initialize pins
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(THERMISTOR_PIN, INPUT);
+
+  // Ensure LEDs are off initially
+  digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(GREEN_LED_PIN, LOW);
+
+  // Serial Monitor Header
+  Serial.println("Time (s),pH,Threshold,Temperature (°C)");
+
+  Serial.println("System Initialized. Place the device in the mouth to activate.");
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Read temperature from thermistor
+  float temperature = readThermistor();
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.println(" °C");
+
+  // Check if the device is in the mouth (temperature above threshold)
+  if (temperature >= THRESHOLD_TEMP) {
+    if (!samplingEnabled) {
+      samplingEnabled = true;
+      Serial.println("Device activated: Sampling Enabled");
+    }
+  } else {
+    if (samplingEnabled) {
+      samplingEnabled = false;
+      Serial.println("Device removed: Sampling Paused");
+    }
+    delay(500); // Debounce delay
+    return;
+  }
+
+  // Perform sampling only when activated
+  if (samplingEnabled && !intervalComplete) {
+    // Increment accumulated sampling time
+    samplingDuration += currentMillis - lastSamplingTime;
+
+    // Request pH reading
+    Serial1.print("R\r");
+    delay(500);
+
+    // Read the pH response
+    String response = "";
+    while (Serial1.available()) {
+      response += (char)Serial1.read();
+    }
+
+    if (response.length() > 0 && isdigit(response[0])) {
+      float pH = response.toFloat();
+
+      // Output data to Serial Monitor
+      Serial.print(samplingDuration / 1000.0); // Time in seconds
+      Serial.print(",");
+      Serial.print(pH);                        // pH value
+      Serial.print(",");
+      Serial.print(PH_THRESHOLD);              // Threshold line for Serial Plotter
+      Serial.print(",");
+      Serial.println(temperature);             // Current temperature
+
+      // Track time spent above or below pH threshold
+      if (pH < PH_THRESHOLD) {
+        totalAcidicTime += currentMillis - lastSamplingTime;
+      } else {
+        totalNeutralTime += currentMillis - lastSamplingTime;
+      }
+    }
+
+    // Check if the 1-minute interval is complete
+    if (samplingDuration >= 60000) {
+      intervalComplete = true;
+
+      // Calculate results
+      float totalTime = totalAcidicTime + totalNeutralTime;
+      float acidicPercentage = 0.0;
+
+      if (totalTime > 0) {  // Avoid division by zero
+        acidicPercentage = (float)totalAcidicTime / totalTime * 100.0;
+      }
+
+      Serial.print("Acidic Percentage: ");
+      Serial.print(acidicPercentage);
+      Serial.println("%");
+
+      // Determine LED state
+      if (acidicPercentage >= 25.0) {
+        digitalWrite(RED_LED_PIN, HIGH);  // Turn Red LED ON
+        digitalWrite(GREEN_LED_PIN, LOW);
+        Serial.println("1 Minute Complete: LED RED (Acidic)");
+      } else {
+        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(GREEN_LED_PIN, HIGH);  // Turn Green LED ON
+        Serial.println("1 Minute Complete: LED GREEN (Neutral)");
+      }
+
+      // Set LED state and reset for the next interval
+      ledStateSet = true;
+      delay(10000); // Hold LED state for 10 seconds
+      resetInterval();
+    }
+  }
+
+  // Update the last sampling time
+  lastSamplingTime = currentMillis;
+}
+
+// Function to read temperature from the thermistor
+float readThermistor() {
+  int analogValue = analogRead(THERMISTOR_PIN);
+  float resistance = (1023.0 / analogValue) - 1.0;  // Convert to resistance
+  resistance = 10000.0 / resistance;               // 10kΩ reference resistor
+
+  // Use the Steinhart-Hart equation to convert resistance to temperature
+  float steinhart;
+  steinhart = resistance / 10000.0;       // (R/R0)
+  steinhart = log(steinhart);             // ln(R/R0)
+  steinhart /= 3950.0;                    // 1/Beta * ln(R/R0)
+  steinhart += 1.0 / (25 + 273.15);       // + (1/T0)
+  steinhart = 1.0 / steinhart;            // Invert
+  steinhart -= 273.15;                    // Convert to Celsius
+
+  return steinhart;
+}
+
+// Function to reset variables for the next interval
+void resetInterval() {
+  samplingDuration = 0;
+  totalAcidicTime = 0;
+  totalNeutralTime = 0;
+  intervalComplete = false;
+  ledStateSet = false;
+  Serial.println("Ready for next interval.");
+}
+
+
